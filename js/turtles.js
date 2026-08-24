@@ -1182,7 +1182,13 @@ Turtles.TurtlesView = class {
         const __makeAllButtons = () => {
             let second = false;
             if (docById("buttoncontainerTOP")) {
-                window.jQuery(".tooltipped").tooltip("close");
+                // "close" is not a method of Materialize 0.100.2's tooltip
+                // plugin -- the only string it understands is "remove", so
+                // "close" silently fell through to a full re-initialization
+                // and left the buttons' tooltip nodes behind in <body> when
+                // the container was removed below (4 orphans per call, and
+                // this runs on every theme change and canvas resize).
+                window.jQuery(".tooltipped").tooltip("remove");
                 docById("buttoncontainerTOP").parentElement.removeChild(
                     docById("buttoncontainerTOP")
                 );

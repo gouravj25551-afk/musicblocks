@@ -62,3 +62,45 @@ window.fixSearchAutocompletePosition = function () {
     instance._mbPositionFixApplied = true;
     return true;
 };
+
+// Keep Materialize's tooltip teardown from destroying Velocity state that an
+// in-flight animation is still going to touch (issue: "Cannot read properties
+// of undefined (reading 'tweensContainer')").
+//
+// Materialize 0.100.2's $.fn.tooltip tears down the previous tooltip with
+// jQuery's .remove(). That runs cleanData(), which deletes the element's
+// "velocity" data. But the show animation Materialize starts on mouseenter
+// ends with
+//
+//     $tooltip.velocity({opacity: 1}, {duration: 300, delay: 50, queue: false})
+//
+// and Velocity implements `delay` + `queue:false` as a bare setTimeout that it
+// never tracks or cancels. Roughly 100-150 ms after a pointer lands on a
+// .tooltipped element there is a pending timer holding a reference to the
+// tooltip node. When that timer fires, Velocity reads Data(element)
+// .tweensContainer -- and if we removed the node in the meantime, the data is
+// gone and it throws. Neither .velocity("stop") nor .stop(true, true) helps,
+// because that setTimeout is not in any queue Velocity knows about.
+//
+// So detach instead of remove. .detach() takes the node out of the document
+// without running cleanData(), so the orphaned animation finishes harmlessly
+// on the detached node and the node is then garbage collected. Patching
+// $.fn.tooltip here fixes every caller at once -- re-init, "remove", and the
+// bogus "close" -- without touching the vendor bundle.
+(function () {
+    const originalTooltip = jQuery.fn.tooltip;
+    if (typeof originalTooltip !== "function") {
+        return;
+    }
+
+    jQuery.fn.tooltip = function (...args) {
+        this.each(function () {
+            const id = this.getAttribute && this.getAttribute("data-tooltip-id");
+            const previous = id && document.getElementById(id);
+            if (previous) {
+                jQuery(previous).detach();
+            }
+        });
+        return originalTooltip.apply(this, args);
+    };
+})();
