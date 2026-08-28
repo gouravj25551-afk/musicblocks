@@ -89,9 +89,12 @@
     border-top: 1px solid #ddd !important;
 }
 
-/* Narrowly scoped hiding of editor-only elements */
+/* Narrowly scoped hiding of editor-only elements. #buttoncontainerTOP holds the
+   floating top-right buttons (Grid, Clear, Collapse, Expand); hiding the whole
+   container keeps them from overlapping the circular #buttoncontainerBOTTOM
+   controls on short (play-only) viewports. */
 .play-only #palette,
-.play-only #Grid,
+.play-only #buttoncontainerTOP,
 .play-only #grid,
 .play-only #searchBar,
 .play-only #languageDiv,
