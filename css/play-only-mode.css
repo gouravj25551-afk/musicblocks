@@ -7,14 +7,23 @@
     min-height: 100vh !important;
 }
 
-/* Floating controls container at bottom-right */
+/* Floating controls container at bottom-right.
+   Lay the buttons out as a single horizontal row anchored to the
+   bottom-right. flex-wrap lets them fall onto additional rows only when the
+   viewport is genuinely too narrow to fit them, so they never overlap while
+   still staying horizontal at normal browser-zoom levels. */
 .play-only #buttoncontainerBOTTOM {
     display: flex !important;
-    flex-direction: column-reverse !important;
-    align-items: flex-end !important;
+    flex-direction: row !important;
+    flex-wrap: wrap !important;
+    justify-content: flex-end !important;
+    align-items: center !important;
     position: fixed !important;
     bottom: 1rem !important;
     right: 1rem !important;
+    /* Cap the width to the space left of the right anchor so the row wraps
+       instead of overflowing off the left edge on very narrow screens. */
+    max-width: calc(100vw - 2rem) !important;
     width: auto !important;
     height: auto !important;
     background: transparent !important;
