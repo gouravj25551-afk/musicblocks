@@ -1240,9 +1240,20 @@ class ToolbarUI {
         const menuIcon = docById("menu");
         const auxToolbar = docById("aux-toolbar");
         menuIcon.onclick = () => {
+            const auxHidden =
+                auxToolbar.style.display === "" || auxToolbar.style.display === "none";
+            // The auxiliary toolbar holds editor-only tools that are not
+            // available in play-only mode. Expanding it there shifts the
+            // workspace down to make room for a second toolbar row and leaves
+            // an empty band below the toolbar, so keep it collapsed. An
+            // already-open toolbar (e.g. opened before play-only mode was
+            // entered) can still be closed.
+            if (auxHidden && document.body && document.body.classList.contains("play-only")) {
+                return;
+            }
             const searchBar = docById("search");
             searchBar.classList.toggle("open");
-            if (auxToolbar.style.display === "" || auxToolbar.style.display === "none") {
+            if (auxHidden) {
                 onclick(this.activity, false);
                 auxToolbar.style.display = "block";
                 menuIcon.textContent = "more_vert";
