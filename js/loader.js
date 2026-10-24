@@ -62,6 +62,9 @@ requirejs.config({
         "Chart": {
             exports: "Chart"
         },
+        "i18nextHttpBackend": {
+            exports: "i18nextHttpBackend"
+        },
         "p5.min": {
             exports: "p5"
         },
@@ -76,6 +79,10 @@ requirejs.config({
         },
         "p5-sound-adapter": {
             deps: ["p5.sound.min"]
+        },
+        "utils/platformstyle": {
+            deps: ["utils/utils-logic"],
+            exports: "platformThemes"
         },
         "utils/plugin-utils": {
             exports: "PluginUtils"
@@ -442,7 +449,7 @@ requirejs.config({
         ],
         "i18nextHttpBackend": [
             "lib/i18nextHttpBackend.min",
-            "https://cdn.jsdelivr.net/npm/i18next-http-backend@2.5.1/i18nextHttpBackend.min"
+            "https://cdn.jsdelivr.net/npm/i18next-http-backend@4.0.2/i18nextHttpBackend.min"
         ]
     },
     packages: []
@@ -718,6 +725,7 @@ requirejs(["i18next", "i18nextHttpBackend"], function (i18next, i18nextHttpBacke
             const CORE_BOOTSTRAP_MODULES = [
                 "easeljs.min",
                 "tweenjs.min",
+                "utils/utils-logic",
                 "utils/platformstyle",
                 "utils/dom-helpers",
                 "utils/utils",

@@ -448,6 +448,84 @@ describe("saveMxmlOutput", () => {
         expect(output).toContain("<duration>24</duration>");
     });
 
+    it("keeps the grid bounded when staging carries huge tuplet factors", () => {
+        // Linus-and-Lucy stages these: durations from floating-point arithmetic factor into
+        // large primes, and the LCM of the three alone is about 1.6e11 divisions per whole
+        // note. Taking it whole wrote <duration> values far past what readers accept.
+        const logo = {
+            notation: {
+                notationStaging: {
+                    0: [
+                        [["C4"], 8, 0, null, null],
+                        [["D4"], 1, 0, [5153, 1], 4096],
+                        [["E4"], 1, 0, [5159, 1], 4096],
+                        [["F4"], 1, 0, [6213, 1], 8192]
+                    ]
+                }
+            }
+        };
+
+        const output = saveMxmlOutput(logo);
+        const divisions = Number(output.match(/<divisions>(\d+)<\/divisions>/)[1]);
+        const durations = [...output.matchAll(/<duration>([^<]*)<\/duration>/g)].map(m => m[1]);
+
+        expect(divisions * 4).toBeLessThanOrEqual(2 ** 20);
+        expect(durations.length).toBeGreaterThan(0);
+        durations.forEach(d => expect(d).toMatch(/^[1-9]\d*$/));
+    });
+
+    it("writes a fractional tuplet factor as a plain note with a rounded duration", () => {
+        // Bartok-fib-color stages [13.333333333333334, 0.5]: not a tuplet MusicXML can write,
+        // and _gcd on it never settled. It becomes a plain note on the grid.
+        const logo = {
+            notation: {
+                notationStaging: {
+                    0: [[["C4"], 1, 0, [13.333333333333334, 0.5], 8]]
+                }
+            }
+        };
+
+        const output = saveMxmlOutput(logo);
+
+        expect(output).not.toContain("<time-modification>");
+        expect(output).not.toMatch(/NaN|Infinity/);
+        output
+            .match(/<duration>([^<]*)<\/duration>/g)
+            .forEach(d => expect(d).toMatch(/<duration>[1-9]\d*<\/duration>/));
+    });
+
+    it("does not build a zero grid from a zero tuplet factor", () => {
+        const logo = { notation: { notationStaging: { 0: [[["C4"], 1, 0, [0, 1], 4]] } } };
+        const output = saveMxmlOutput(logo);
+
+        expect(output).not.toContain("<divisions>0</divisions>");
+        expect(output).toMatch(/<duration>[1-9]\d*<\/duration>/);
+    });
+
+    it("keeps a NaN tuplet factor out of <duration>", () => {
+        const logo = { notation: { notationStaging: { 0: [[["C4"], 1, 0, [NaN, 1], 4]] } } };
+        const output = saveMxmlOutput(logo);
+
+        expect(output).not.toMatch(/NaN|Infinity/);
+        // Falls back to the staged quarter note: 32 divisions per whole note / 4.
+        expect(output).toContain("<duration>8</duration>");
+    });
+
+    it("fills measures with the rounded durations it writes", () => {
+        // The 5153 tuplet sets the grid to 32 * 5153 = 164896 divisions per whole note, which is
+        // one 4/4 measure. The 5159 tuplet can't join it (it would pass the cap), so each of those
+        // notes is written as round(164896 / 5159) = 32 divisions instead of 31.96. The
+        // written lengths, 32 + 5153 * 32 = 164928, overflow the measure, so a second one
+        // must start; counted at the exact length they would not.
+        const first = [["C4"], 1, 0, [5153, 1], 4096];
+        const rest = Array.from({ length: 5153 }, () => [["D4"], 1, 0, [5159, 1], 4096]);
+        const logo = { notation: { notationStaging: { 0: [first, ...rest] } } };
+        const output = saveMxmlOutput(logo);
+
+        expect(output).toContain("<divisions>41224</divisions>");
+        expect(output).toContain('<measure number="2"');
+    });
+
     it("should emit time-modification with the reduced actual/normal notes ratio for a tuplet note", () => {
         const logo = {
             notation: {
@@ -1504,5 +1582,134 @@ describe("saveMxmlOutput - forever repeats", () => {
         const measures = measuresOf(exportVoice([note("C4"), note("G4")]));
 
         expect(barlinesOf(measures[0])).toEqual(["plain:none"]);
+    });
+});
+
+describe("saveMxmlOutput - written note types", () => {
+    // [pitches, noteValue, dotCount, tupletValue, roundDown, insideChord, staccato, drum]
+    const note = (value, dots = 0) => [["G4"], value, dots, null, null, false, false, null];
+    // durationToNoteValue()'s tuplet fallback: the sentinel note value, with the real
+    // shape in tupletValue and the power of two it rounds down to in roundDown.
+    const tuplet = (ratio, roundDown) => [["G4"], 1, 0, ratio, roundDown, false, false, null];
+
+    const exportOf = staging => saveMxmlOutput({ notation: { notationStaging: { 0: staging } } });
+    const typesOf = staging =>
+        [...exportOf(staging).matchAll(/<type>([^<]+)<\/type>/g)].map(m => m[1]);
+    const dotsOf = staging => (exportOf(staging).match(/<dot\/>/g) || []).length;
+
+    it.each([
+        [1, "whole"],
+        [2, "half"],
+        [4, "quarter"],
+        [8, "eighth"],
+        [16, "16th"],
+        [32, "32nd"],
+        [64, "64th"]
+    ])("writes a note value of %i as %s", (value, type) => {
+        expect(typesOf([note(value)])).toEqual([type]);
+    });
+
+    it("writes one dot per dot the note carries", () => {
+        expect(dotsOf([note(2)])).toBe(0);
+        expect(dotsOf([note(2, 1)])).toBe(1);
+        expect(dotsOf([note(2, 2)])).toBe(2);
+    });
+
+    // A tuplet note's duration is scaled by its ratio, so a reader can only recover the
+    // written note from <type>. Lilypond's own importer stops on a tuplet note without one.
+    it("takes a tuplet note's type from the value it rounds down to", () => {
+        expect(typesOf([tuplet([3, 4], 8)])).toEqual(["eighth"]);
+        expect(typesOf([tuplet([5, 4], 16)])).toEqual(["16th"]);
+    });
+
+    it("leaves a tuplet note undotted", () => {
+        expect(dotsOf([tuplet([3, 4], 8)])).toBe(0);
+    });
+
+    it("writes the type before the time-modification, as the schema orders them", () => {
+        const output = exportOf([tuplet([3, 4], 8)]);
+
+        expect(output).toContain("<type>");
+        expect(output).toContain("<time-modification>");
+        expect(output.indexOf("<type>")).toBeLessThan(output.indexOf("<time-modification>"));
+    });
+
+    it("writes a type for a rest too", () => {
+        const rest = [["R"], 2, 0, null, null, false, false, null];
+
+        expect(typesOf([note(4), rest])).toEqual(["quarter", "half"]);
+    });
+});
+
+describe("saveMxmlOutput - key mode", () => {
+    const note = pitch => [[pitch], 4, 0, null, null, false, false, null];
+    const exportOf = staging => saveMxmlOutput({ notation: { notationStaging: { 0: staging } } });
+    const modesIn = staging =>
+        [...exportOf(staging).matchAll(/<mode>([^<]+)<\/mode>/g)].map(m => m[1]);
+
+    // A minor and C major share a signature, so <fifths> alone cannot tell a
+    // reader which one the piece is in.
+    it.each([
+        ["C", "major", "major"],
+        ["A", "minor", "minor"],
+        ["A", "m", "minor"],
+        ["A", "aeolian", "minor"],
+        ["A", "natural minor", "minor"],
+        ["D", "dorian", "dorian"],
+        ["E", "phrygian", "phrygian"],
+        ["F", "lydian", "lydian"],
+        ["G", "mixolydian", "mixolydian"],
+        ["B", "locrian", "locrian"],
+        ["C", "ionian", "major"]
+    ])("writes %s %s as mode %s", (key, mode, written) => {
+        expect(modesIn(["key", key, mode, note("C4")])).toEqual([written]);
+    });
+
+    // These carry a signature of their own, so the key is still written, but
+    // <mode> was never meant to name them.
+    it.each(["major pentatonic", "minor pentatonic", "major blues", "minor blues", "hirajoshi"])(
+        "writes a signature but no mode for %s",
+        mode => {
+            const output = exportOf(["key", "C", mode, note("C4")]);
+
+            expect(output).toContain("<fifths>");
+            expect(modesIn(["key", "C", mode, note("C4")])).toEqual([]);
+        }
+    );
+
+    // These have no signature at all, so the key is left where it was, which is
+    // the C major the score opens in.
+    it.each(["whole tone", "chromatic"])("leaves the opening key alone for %s", mode => {
+        expect(modesIn(["key", "C", mode, note("C4")])).toEqual(["major"]);
+    });
+
+    it("writes the mode in the measure header as well as on a later change", () => {
+        const modes = modesIn(["key", "A", "minor", note("C4"), "key", "D", "dorian", note("D4")]);
+
+        expect(modes).toEqual(["minor", "dorian"]);
+    });
+
+    it("writes a change of mode that keeps the same signature", () => {
+        // C major to A minor is still a key change, though <fifths> stays 0.
+        const output = exportOf(["key", "C", "major", note("C4"), "key", "A", "minor", note("D4")]);
+
+        expect([...output.matchAll(/<mode>([^<]+)<\/mode>/g)].map(m => m[1])).toEqual([
+            "major",
+            "minor"
+        ]);
+    });
+
+    it("keeps the mode out of a percussion part, which carries no key", () => {
+        const output = saveMxmlOutput({
+            notation: {
+                notationStaging: { 0: ["key", "A", "minor", note("C4")] },
+                notationDrumStaging: {
+                    0: [[["snare drum"], 4, 0, null, null, false, false, "snare drum"]]
+                }
+            }
+        });
+        const percussion = output.slice(output.indexOf('<part id="D1"'));
+
+        expect(percussion).not.toContain("<mode>");
     });
 });

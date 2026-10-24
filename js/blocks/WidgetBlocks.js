@@ -400,19 +400,20 @@ function setupWidgetBlocks(activity) {
             logo.synth.temperamentChanged(args[0], logo.synth.startingPitch);
             const scale = [];
 
-            if (
-                activity.blocks.blockList[activity.blocks.blockList[blk].connections[2]].name ===
-                "pitch"
-            ) {
-                const pitchBlock =
-                    activity.blocks.blockList[activity.blocks.blockList[blk].connections[2]];
-                const note = activity.blocks.blockList[pitchBlock.connections[1]].value;
-                const octave = activity.blocks.blockList[pitchBlock.connections[2]].value;
+            const pitchBlock =
+                activity.blocks.blockList[activity.blocks.blockList[blk].connections[2]];
+            if (pitchBlock && pitchBlock.name === "pitch") {
+                const noteBlock = activity.blocks.blockList[pitchBlock.connections[1]];
+                const octaveBlock = activity.blocks.blockList[pitchBlock.connections[2]];
                 const setKey = activity.blocks.blockList[pitchBlock.connections[3]];
-                scale[0] = activity.blocks.blockList[setKey.connections[1]].value;
-                scale[1] = activity.blocks.blockList[setKey.connections[2]].value;
-                logo.synth.startingPitch = note + octave;
-                logo.temperament.scale = scale;
+                const keyNameBlock = setKey && activity.blocks.blockList[setKey.connections[1]];
+                const keyModeBlock = setKey && activity.blocks.blockList[setKey.connections[2]];
+                if (noteBlock && octaveBlock && keyNameBlock && keyModeBlock) {
+                    scale[0] = keyNameBlock.value;
+                    scale[1] = keyModeBlock.value;
+                    logo.synth.startingPitch = noteBlock.value + octaveBlock.value;
+                    logo.temperament.scale = scale;
+                }
             }
 
             const listenerName = "_temperament_" + turtle;
@@ -500,6 +501,7 @@ function setupWidgetBlocks(activity) {
 
             const __listener = event => {
                 logo.sample.init(activity);
+                logo.inSample = false;
             };
 
             logo.setTurtleListener(turtle, listenerName, __listener);
@@ -577,6 +579,10 @@ function setupWidgetBlocks(activity) {
                 logo,
                 "timbre",
                 _getWidgetDependencies(typeof TimbreWidget !== "undefined" ? TimbreWidget : null, [
+                    "widgets/TimbreState",
+                    "widgets/TimbrePanels",
+                    "widgets/TimbreAudio",
+                    "widgets/TimbreBlocks",
                     "widgets/timbre"
                 ]),
                 () => new TimbreWidget(),
@@ -917,6 +923,13 @@ function setupWidgetBlocks(activity) {
                 logo,
                 "tempo",
                 _getWidgetDependencies(typeof Tempo !== "undefined" ? Tempo : null, [
+                    "widgets/TempoWindow",
+                    "widgets/TempoRows",
+                    "widgets/TempoKeyboard",
+                    "widgets/TempoTap",
+                    "widgets/TempoControls",
+                    "widgets/TempoMetronome",
+                    "widgets/TempoSave",
                     "widgets/tempo"
                 ]),
                 () => new Tempo(),
@@ -930,12 +943,14 @@ function setupWidgetBlocks(activity) {
             logo.tempo.BPMBlocks = [];
             logo.tempo.BPMs = [];
             logo.tempo.BPMTurtles = [];
+            logo.tempo.beatValues = [];
 
             const listenerName = "_tempo_" + turtle;
             logo.setDispatchBlock(blk, turtle, listenerName);
 
             const __listener = () => {
                 logo.tempo.init(activity);
+                logo.inTempo = false;
             };
 
             logo.setTurtleListener(turtle, listenerName, __listener);
@@ -1084,7 +1099,15 @@ function setupWidgetBlocks(activity) {
                 "pitchDrumMatrix",
                 _getWidgetDependencies(
                     typeof PitchDrumMatrix !== "undefined" ? PitchDrumMatrix : null,
-                    ["widgets/pitchdrummatrix"]
+                    [
+                        "widgets/PitchDrumMatrixWindow",
+                        "widgets/PitchDrumMatrixGrid",
+                        "widgets/PitchDrumMatrixBlocks",
+                        "widgets/PitchDrumMatrixCells",
+                        "widgets/PitchDrumMatrixPlayback",
+                        "widgets/PitchDrumMatrixSave",
+                        "widgets/pitchdrummatrix"
+                    ]
                 ),
                 () => new PitchDrumMatrix(),
                 turtle,
@@ -1103,9 +1126,10 @@ function setupWidgetBlocks(activity) {
             logo.setDispatchBlock(blk, turtle, listenerName);
 
             const __listener = () => {
+                logo.inPitchDrumMatrix = false;
                 if (
                     logo.pitchDrumMatrix.drums.length === 0 ||
-                    logo.pitchDrumMatrix.rowLabels.length === 0
+                    !logo.pitchDrumMatrix.hasPitchRows()
                 ) {
                     activity.errorMsg(
                         _(
@@ -1291,25 +1315,14 @@ function setupWidgetBlocks(activity) {
             this.setPalette("widgets", activity);
             this.beginnerBlock(true);
 
-            if (activity.beginnerMode && this.lang === "ja") {
-                this.setHelpString([
-                    _(
-                        "The Music keyboard block opens a piano keyboard that can be used to create notes."
-                    ),
-                    "documentation",
-                    null,
-                    "musickeyboardja"
-                ]);
-            } else {
-                this.setHelpString([
-                    _(
-                        "The Music keyboard block opens a piano keyboard that can be used to create notes."
-                    ),
-                    "documentation",
-                    null,
-                    "musickeyboard2"
-                ]);
-            }
+            this.setHelpString([
+                _(
+                    "The Music keyboard block opens a piano keyboard that can be used to create notes."
+                ),
+                "documentation",
+                null,
+                "musickeyboard2"
+            ]);
 
             //.TRANS: widget to generate pitches using a slider
             this.formBlock({ name: _("music keyboard"), canCollapse: true });
@@ -1354,7 +1367,12 @@ function setupWidgetBlocks(activity) {
             const listenerName = "_musickeyboard_" + turtle;
             logo.setDispatchBlock(blk, turtle, listenerName);
 
+            // The keyboard plays and saves at this turtle's tempo (the turtle itself, not its
+            // index, which shifts when a turtle is removed). Set when this listener opens it, so
+            // another turtle's Music Keyboard block running in between can't swap it.
+            const keyboardTurtle = activity.turtles.ithTurtle(turtle);
             const __listener = () => {
+                logo.musicKeyboard.turtle = keyboardTurtle;
                 logo.musicKeyboard.init(logo);
             };
 
@@ -1554,6 +1572,7 @@ function setupWidgetBlocks(activity) {
 
             logo.rhythmRuler.Rulers = [];
             logo.rhythmRuler.Drums = [];
+            logo.rhythmRuler.rulerBlock = blk;
             logo.inRhythmRuler = true;
 
             const listenerName = "_rhythmruler_" + turtle;
@@ -2073,9 +2092,7 @@ function setupWidgetBlocks(activity) {
          * @returns {number[]} - The output values.
          */
         flow(args, logo, turtle, blk) {
-            logo.inSample = true;
-
-            const listenerName = "_sampler_" + turtle;
+            const listenerName = "_aimusic_" + turtle;
             logo.setDispatchBlock(blk, turtle, listenerName);
 
             const __listener = event => {

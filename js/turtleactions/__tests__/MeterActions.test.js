@@ -126,6 +126,38 @@ describe("setupMeterActions", () => {
         expect(targetTurtle.singer.defaultStrongBeats).toBe(false);
     });
 
+    describe("strong beats chosen with on strong beat", () => {
+        beforeEach(() => {
+            Singer.MeterActions.setMeter(4, 1 / 4, 0);
+            Singer.MeterActions.onStrongBeatDo(2, "testAction", false, null, 0, 1);
+            Singer.MeterActions.onWeakBeatDo("testAction", false, null, 0, 1);
+        });
+
+        it("replace the default strong beats", () => {
+            expect(targetTurtle.singer.beatList).toEqual([2, "offbeat"]);
+        });
+
+        it("survive later meter changes", () => {
+            Singer.MeterActions.setMeter(4, 1 / 4, 0);
+            Singer.MeterActions.setMeter(4, 1 / 4, 0);
+            expect(targetTurtle.singer.beatList).toEqual([2, "offbeat"]);
+            expect(targetTurtle.singer.defaultStrongBeats).toBe(false);
+        });
+
+        it("survive a change to a meter with different defaults", () => {
+            Singer.MeterActions.setMeter(6, 1 / 8, 0);
+            expect(targetTurtle.singer.beatList).toEqual([2, "offbeat"]);
+        });
+    });
+
+    it("keeps a strong beat past the end of the measure from bringing the defaults back", () => {
+        Singer.MeterActions.setMeter(4, 1 / 4, 0);
+        Singer.MeterActions.onStrongBeatDo(9, "testAction", false, null, 0, 1);
+        Singer.MeterActions.setMeter(4, 1 / 4, 0);
+        expect(targetTurtle.singer.factorList).toEqual([9]);
+        expect(targetTurtle.singer.beatList).toEqual([]);
+    });
+
     it("should not clear manually-set beats when defaultStrongBeats is false", () => {
         targetTurtle.singer.beatList = [2, 5];
         targetTurtle.singer.defaultStrongBeats = false;
@@ -196,6 +228,26 @@ describe("setupMeterActions", () => {
             // bpm stack must be unchanged — no bad value was stored
             expect(targetTurtle.singer.bpm).toEqual(bpmBefore);
         });
+
+        test.each([
+            ["NaN", NaN],
+            ["zero", 0],
+            ["negative", -0.5],
+            ["Infinity", Infinity],
+            ["-Infinity", -Infinity]
+        ])(
+            "setBPM with bad beatValue (%s) shows an error and does not push to bpm",
+            (label, badBeatVal) => {
+                activity.errorMsg.mockClear();
+                const bpmBefore = [...targetTurtle.singer.bpm];
+                Singer.MeterActions.setBPM(120, badBeatVal, 0, 1);
+                expect(activity.errorMsg).toHaveBeenCalledWith(
+                    "Beat value must be a positive number.",
+                    1
+                );
+                expect(targetTurtle.singer.bpm).toEqual(bpmBefore);
+            }
+        );
     });
 
     describe("master BPM settings", () => {
@@ -216,6 +268,77 @@ describe("setupMeterActions", () => {
             }
             expect(Singer.masterBPM).toBe(expected);
             if (!errors.length) expect(Singer.defaultBPMFactor).toBe(TONEBPM / expected);
+        });
+
+        test.each([
+            ["NaN", NaN],
+            ["zero", 0],
+            ["negative", -60],
+            ["Infinity", Infinity],
+            ["-Infinity", -Infinity]
+        ])("setMasterBPM(%s) shows an error and does not mutate masterBPM", (label, badBpm) => {
+            activity.errorMsg.mockClear();
+            const masterBpmBefore = Singer.masterBPM;
+            const factorBefore = Singer.defaultBPMFactor;
+
+            Singer.MeterActions.setMasterBPM(badBpm, 0.25, 1);
+
+            expect(activity.errorMsg).toHaveBeenCalledWith("BPM must be a positive number.", 1);
+            expect(Singer.masterBPM).toBe(masterBpmBefore);
+            expect(Singer.defaultBPMFactor).toBe(factorBefore);
+        });
+
+        test.each([
+            ["NaN", NaN],
+            ["zero", 0],
+            ["negative", -0.25],
+            ["Infinity", Infinity],
+            ["-Infinity", -Infinity]
+        ])(
+            "setMasterBPM with bad beatValue (%s) shows an error and does not mutate masterBPM",
+            (label, badBeatValue) => {
+                activity.errorMsg.mockClear();
+                const masterBpmBefore = Singer.masterBPM;
+                const factorBefore = Singer.defaultBPMFactor;
+
+                Singer.MeterActions.setMasterBPM(120, badBeatValue, 1);
+
+                expect(activity.errorMsg).toHaveBeenCalledWith(
+                    "Beat value must be a positive number.",
+                    1
+                );
+                expect(Singer.masterBPM).toBe(masterBpmBefore);
+                expect(Singer.defaultBPMFactor).toBe(factorBefore);
+            }
+        );
+    });
+
+    describe("setMeter handles NaN and invalid inputs gracefully", () => {
+        test.each([
+            ["NaN beatCount", NaN, 1 / 4, 4, 4],
+            ["zero beatCount", 0, 1 / 4, 4, 4],
+            ["negative beatCount", -3, 1 / 4, 4, 4],
+            ["NaN noteValue", 4, NaN, 4, 4],
+            ["zero noteValue", 4, 0, 4, 4],
+            ["negative noteValue", 4, -4, 4, 4],
+            ["both NaN", NaN, NaN, 4, 4]
+        ])("should sanitize %s: setMeter(%s, %s)", (desc, beats, noteVal, expBeats, expNoteVal) => {
+            Singer.MeterActions.setMeter(beats, noteVal, 0);
+            expect(targetTurtle.singer.beatsPerMeasure).toBe(expBeats);
+            expect(targetTurtle.singer.noteValuePerBeat).toBe(expNoteVal);
+        });
+    });
+
+    describe("setPickup handles NaN and non-finite inputs gracefully", () => {
+        test.each([
+            ["NaN", NaN, 0],
+            ["Infinity", Infinity, 0],
+            ["-Infinity", -Infinity, 0],
+            ["negative", -5, 0],
+            ["valid positive", 3, 3]
+        ])("setPickup with %s (%s) should result in pickup %i", (label, val, expected) => {
+            Singer.MeterActions.setPickup(val, 0);
+            expect(targetTurtle.singer.pickup).toBe(expected);
         });
     });
 

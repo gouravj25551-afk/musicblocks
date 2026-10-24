@@ -18,7 +18,13 @@
  */
 
 global.Midi = jest.fn().mockImplementation(() => ({
-    header: { ticksPerBeat: 480 },
+    header: {
+        ticksPerBeat: 480,
+        tempos: [],
+        timeSignatures: [],
+        secondsToTicks: jest.fn(() => 0),
+        update: jest.fn()
+    },
     addTrack: jest.fn(() => ({
         addNote: jest.fn(),
         name: "",
@@ -627,6 +633,23 @@ describe("afterSaveMIDI", () => {
         expect(document.body.style.cursor).toBe("default");
     });
 
+    it("should defer MIDI generation without a fixed export delay", () => {
+        const data = mockActivity.logo._midiData;
+        document.body.style.cursor = "wait";
+
+        instance.afterSaveMIDI();
+
+        expect(mockActivity.save.download).not.toHaveBeenCalled();
+        expect(mockActivity.logo._midiData).toBe(data);
+        expect(document.body.style.cursor).toBe("wait");
+
+        jest.advanceTimersByTime(0);
+
+        expect(mockActivity.save.download).toHaveBeenCalledWith("midi", "mockURL", null);
+        expect(mockActivity.logo._midiData).toEqual({});
+        expect(document.body.style.cursor).toBe("default");
+    });
+
     it("should handle empty MIDI data gracefully", () => {
         mockActivity.logo._midiData = {};
         instance.afterSaveMIDI();
@@ -653,6 +676,266 @@ describe("afterSaveMIDI", () => {
             duration: 0.6666666666666666,
             velocity: 0.8
         });
+    });
+
+    it("should skip notes with zero or invalid duration and not corrupt globalTime with Infinity", () => {
+        mockActivity.logo._midiData = {
+            0: [
+                {
+                    note: ["C4"],
+                    duration: 0,
+                    bpm: 90,
+                    instrument: "guitar"
+                },
+                {
+                    note: ["D4"],
+                    duration: -2,
+                    bpm: 90,
+                    instrument: "guitar"
+                },
+                {
+                    note: ["E4"],
+                    duration: NaN,
+                    bpm: 90,
+                    instrument: "guitar"
+                },
+                {
+                    note: ["F4"],
+                    duration: 4,
+                    bpm: 90,
+                    instrument: "guitar"
+                }
+            ]
+        };
+
+        instance.afterSaveMIDI();
+        jest.runAllTimers();
+
+        const tracks = Midi.mock.results[0].value.addTrack.mock.results.map(res => res.value);
+        const instrumentTrack = tracks.find(track => track.name === "Track 1 - guitar");
+
+        // The zero, negative, and NaN duration notes should be skipped.
+        // F4 should be the only note added, starting at time 0 (not Infinity).
+        expect(instrumentTrack.addNote).toHaveBeenCalledTimes(1);
+        expect(instrumentTrack.addNote).toHaveBeenCalledWith({
+            name: "F4",
+            time: 0,
+            duration: 0.6666666666666666,
+            velocity: 0.8
+        });
+    });
+
+    it("should handle drum notes with invalid bpm safely by falling back to 90 bpm", () => {
+        mockActivity.logo._midiData = {
+            0: [
+                {
+                    note: ["snare drum"],
+                    drum: ["snare drum"],
+                    duration: 4,
+                    bpm: 0,
+                    instrument: "drums"
+                }
+            ]
+        };
+
+        instance.afterSaveMIDI();
+        jest.runAllTimers();
+
+        const tracks = Midi.mock.results[0].value.addTrack.mock.results.map(res => res.value);
+        const drumTrack = tracks.find(track => track.name === "Track 1 - snare drum");
+
+        expect(drumTrack.addNote).toHaveBeenCalledWith({
+            midi: 38,
+            time: 0,
+            duration: 0.6666666666666666,
+            velocity: 0.9
+        });
+    });
+});
+
+describe("afterSaveMIDI tempo and time signatures", () => {
+    const { Midi: ToneMidi } = require("@tonejs/midi");
+    let mockMidi;
+    let instance;
+    let exported;
+
+    // Exports the notes through the real MIDI library and reads the file back.
+    const exportMidi = data => {
+        instance.activity.logo._midiData = data;
+        instance.afterSaveMIDI();
+        jest.runAllTimers();
+        return new ToneMidi(exported);
+    };
+
+    const note = (name, duration, bpm, meter) => ({
+        note: [name],
+        duration,
+        bpm,
+        instrument: "guitar",
+        meter
+    });
+
+    const noteTicks = (midi, trackName) =>
+        midi.tracks
+            .find(track => track.name === trackName)
+            .notes.map(n => [n.ticks, n.durationTicks]);
+
+    beforeEach(() => {
+        jest.useFakeTimers();
+        mockMidi = global.Midi;
+        global.Midi = class extends ToneMidi {
+            toArray() {
+                exported = super.toArray();
+                return exported;
+            }
+        };
+        const activity = { logo: {}, save: { download: jest.fn() } };
+        instance = new SaveInterface(activity);
+        instance.activity = activity;
+        global.URL.createObjectURL = jest.fn(() => "mockURL");
+        global.getMidiInstrument = jest.fn(() => ({ default: 0, guitar: 25 }));
+        global.getMidiDrum = jest.fn(() => ({}));
+    });
+
+    afterEach(() => {
+        global.Midi = mockMidi;
+        jest.useRealTimers();
+    });
+
+    it("writes the tempo and meter, so a quarter note lasts one beat", () => {
+        const meter = [3, 4];
+        const midi = exportMidi({
+            0: [note("G4", 4, 90, meter), note("A4", 4, 90, meter), note("B4", 4, 90, meter)]
+        });
+
+        // MIDI stores a tempo in whole microseconds per beat.
+        expect(midi.header.tempos.map(t => [t.ticks, Math.round(t.bpm)])).toEqual([[0, 90]]);
+        expect(midi.header.timeSignatures.map(t => [t.ticks, t.timeSignature])).toEqual([
+            [0, [3, 4]]
+        ]);
+        expect(noteTicks(midi, "Track 1 - guitar")).toEqual([
+            [0, 480],
+            [480, 480],
+            [960, 480]
+        ]);
+    });
+
+    it("writes a tempo change where it happens", () => {
+        const meter = [4, 4];
+        const midi = exportMidi({
+            0: [
+                note("G4", 4, 90, meter),
+                note("A4", 4, 90, meter),
+                note("B4", 4, 180, meter),
+                note("C5", 4, 180, meter)
+            ]
+        });
+
+        expect(midi.header.tempos.map(t => [t.ticks, Math.round(t.bpm)])).toEqual([
+            [0, 90],
+            [960, 180]
+        ]);
+        expect(noteTicks(midi, "Track 1 - guitar")).toEqual([
+            [0, 480],
+            [480, 480],
+            [960, 480],
+            [1440, 480]
+        ]);
+        // The notes still play at the project's tempo.
+        const seconds = midi.tracks
+            .find(track => track.name === "Track 1 - guitar")
+            .notes.map(n => n.time);
+        expect(seconds[2]).toBeCloseTo(4 / 3, 5);
+        expect(seconds[3]).toBeCloseTo(4 / 3 + 1 / 3, 5);
+    });
+
+    it("writes a meter change from 3/4 to 6/8 where it happens", () => {
+        const midi = exportMidi({
+            0: [
+                ...Array(3).fill(note("G4", 4, 90, [3, 4])),
+                ...Array(6).fill(note("A4", 8, 90, [6, 8]))
+            ]
+        });
+
+        expect(midi.header.timeSignatures.map(t => [t.ticks, t.timeSignature])).toEqual([
+            [0, [3, 4]],
+            [1440, [6, 8]]
+        ]);
+        expect(noteTicks(midi, "Track 1 - guitar").slice(3, 5)).toEqual([
+            [1440, 240],
+            [1680, 240]
+        ]);
+    });
+
+    it("writes no time signature for a meter MIDI cannot hold, but still the tempo", () => {
+        const midi = exportMidi({
+            0: [note("G4", 4, 120, [5, 3]), note("A4", 4, 120, undefined)]
+        });
+
+        expect(midi.header.timeSignatures).toEqual([]);
+        expect(midi.header.tempos.map(t => [t.ticks, Math.round(t.bpm)])).toEqual([[0, 120]]);
+        expect(noteTicks(midi, "Track 1 - guitar")).toEqual([
+            [0, 480],
+            [480, 480]
+        ]);
+    });
+
+    it("takes the tempo from the first track and keeps other tracks at their own timing", () => {
+        const midi = exportMidi({
+            0: [note("G4", 4, 90, [4, 4]), note("A4", 4, 90, [4, 4])],
+            1: [note("C4", 4, 180, [4, 4]), note("D4", 4, 180, [4, 4])]
+        });
+
+        expect(midi.header.tempos.map(t => [t.ticks, Math.round(t.bpm)])).toEqual([[0, 90]]);
+        const seconds = midi.tracks
+            .find(track => track.name === "Track 2 - guitar")
+            .notes.map(n => n.time);
+        expect(seconds[0]).toBeCloseTo(0, 5);
+        expect(seconds[1]).toBeCloseTo(1 / 3, 5);
+    });
+
+    it("takes the tempo from the first track with notes, not one with only rests", () => {
+        const midi = exportMidi({
+            0: [note("R", 4, 120, [3, 4]), note("R", 4, 120, [3, 4])],
+            1: [note("G4", 4, 90, [4, 4]), note("A4", 4, 90, [4, 4])],
+            2: [{ ...note("C2", 4, 60, [2, 4]), drum: "kick drum" }]
+        });
+
+        expect(midi.header.tempos.map(t => [t.ticks, Math.round(t.bpm)])).toEqual([[0, 90]]);
+        expect(midi.header.timeSignatures.map(t => [t.ticks, t.timeSignature])).toEqual([
+            [0, [4, 4]]
+        ]);
+        expect(noteTicks(midi, "Track 2 - guitar")).toEqual([
+            [0, 480],
+            [480, 480]
+        ]);
+    });
+
+    it("takes the tempo from a track with only drums", () => {
+        const midi = exportMidi({
+            0: [{ ...note("C2", 4, 60, [2, 4]), drum: "kick drum" }],
+            1: [note("G4", 4, 90, [4, 4])]
+        });
+
+        expect(midi.header.tempos.map(t => [t.ticks, Math.round(t.bpm)])).toEqual([[0, 60]]);
+        expect(midi.header.timeSignatures.map(t => [t.ticks, t.timeSignature])).toEqual([
+            [0, [2, 4]]
+        ]);
+    });
+
+    it("writes neither tempo nor time signature when no note is written", () => {
+        const midi = exportMidi({
+            0: [
+                note("G4", 0, 90, [4, 4]),
+                { ...note("A4", 4, 90, [4, 4]), note: [] },
+                // A note value so small that the note would last forever.
+                note("B4", Number.MIN_VALUE, 90, [4, 4])
+            ]
+        });
+
+        expect(midi.header.tempos).toEqual([]);
+        expect(midi.header.timeSignatures).toEqual([]);
+        expect(midi.tracks.every(track => track.notes.length === 0)).toBe(true);
     });
 });
 
@@ -698,6 +981,25 @@ describe("save artwork methods", () => {
             "svg",
             "data:image/svg+xml;utf8,<svg>Mock SVG</svg>",
             null
+        );
+    });
+
+    it("should save the SVG under a given file name", () => {
+        global.doSVG = jest.fn(() => "<svg>Mock SVG</svg>");
+        const activity = {
+            save: {
+                download: mockDownload
+            },
+            canvas: { width: 500, height: 500 },
+            logo: "mockLogo",
+            turtles: "mockTurtles"
+        };
+
+        instance.saveSVG(activity, "drawing.svg");
+        expect(mockDownload).toHaveBeenCalledWith(
+            "svg",
+            "data:image/svg+xml;utf8,<svg>Mock SVG</svg>",
+            "drawing.svg"
         );
     });
 
@@ -884,6 +1186,19 @@ describe("saveWAV & saveABC methods", () => {
         expect(mockDownload).toHaveBeenCalledWith("abc", "data:text;utf8,mock_abc_data", null);
         expect(activity.logo.notationOutput).toBe("");
         expect(activity.logo.recordingBuffer.hasData).toBe(false);
+    });
+
+    it("should save ABC notation under the file name it is given", () => {
+        global.saveAbcOutput = jest.fn(() => "mock_abc_data");
+        const activity = { save: { download: mockDownload } };
+
+        instance.afterSaveAbc.call({ activity }, "mysong.abc");
+
+        expect(mockDownload).toHaveBeenLastCalledWith(
+            "abc",
+            "data:text;utf8,mock_abc_data",
+            "mysong.abc"
+        );
     });
 });
 
@@ -1081,6 +1396,20 @@ describe("saveLilypond Methods", () => {
         });
     });
 
+    it("should give a block-saved Lilypond file the default header and closing sections", () => {
+        instance.afterSaveLilypond = jest.fn();
+        instance.saveLilypondFromBlock("song.ly");
+
+        const logo = instance.activity.logo;
+        expect(logo.notationOutput).toBe(LILYPONDHEADER);
+        // The MIDI section closes the \score block.
+        expect(logo.MIDIOutput).toContain("% MIDI SECTION");
+        expect(logo.MIDIOutput.trimEnd().endsWith("}")).toBe(true);
+        expect(logo.guitarOutputHead).toContain("% GUITAR TAB SECTION");
+        expect(logo.guitarOutputEnd).toContain(">>");
+        expect(instance.afterSaveLilypond).toHaveBeenCalledWith("song.ly");
+    });
+
     it("should open the Lilypond modal and populate fields", () => {
         instance.saveLilypond(activity);
 
@@ -1175,7 +1504,8 @@ describe("saveLilypond Methods", () => {
     it("should call saveLilypondOutput and afterSaveLilypondLY and clear notation output/buffer", () => {
         instance.activity.logo.notationOutput = "previous_lilypond_output";
         instance.activity.logo.recordingBuffer.hasData = true;
-        instance.afterSaveLilypond("ignored.ly");
+        // Called with no file name, as when an export finishes, it uses the dialog's.
+        instance.afterSaveLilypond();
         expect(mockSaveLilypondOutput).toHaveBeenCalledWith(instance.activity);
         expect(instance.afterSaveLilypondLY).toHaveBeenCalledWith(
             "Lilypond Data",
@@ -1184,6 +1514,11 @@ describe("saveLilypond Methods", () => {
         expect(instance.notationConvert).toBe("");
         expect(instance.activity.logo.notationOutput).toBe("");
         expect(instance.activity.logo.recordingBuffer.hasData).toBe(false);
+    });
+
+    it("should save Lilypond under the file name it is given", () => {
+        instance.afterSaveLilypond("mysong.ly");
+        expect(instance.afterSaveLilypondLY).toHaveBeenCalledWith("Lilypond Data", "mysong.ly");
     });
 
     it('should set cursor to "wait" and call ly2pdf with correct arguments', () => {
@@ -1264,6 +1599,26 @@ describe("saveLilypond Methods", () => {
         expect(writeText).toHaveBeenCalledWith(lydata);
         expect(document.execCommand).toHaveBeenCalledWith("copy");
         expect(mockActivity.textMsg).not.toHaveBeenCalled();
+    });
+
+    it("should download the .ly file under the given file name, or the dialog's", () => {
+        delete navigator.clipboard;
+        document.execCommand.mockReturnValue(true);
+        saveInterface.download = jest.fn();
+
+        saveInterface.afterSaveLilypondLY(lydata, "mysong.ly");
+        expect(saveInterface.download).toHaveBeenLastCalledWith(
+            "ly",
+            expect.any(String),
+            "mysong.ly"
+        );
+
+        saveInterface.afterSaveLilypondLY(lydata);
+        expect(saveInterface.download).toHaveBeenLastCalledWith(
+            "ly",
+            expect.any(String),
+            "TestProject.ly"
+        );
     });
 
     it("should use legacy copy when Clipboard API is unavailable", () => {

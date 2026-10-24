@@ -883,6 +883,67 @@ describe("Logo _restoreConnections", () => {
     });
 });
 
+// ─── Logo getRestoredConnections ──────────────────────────────────────────────
+
+describe("Logo getRestoredConnections", () => {
+    let logo;
+
+    // A duplicate notes clamp (0) holding note 1 -> hidden 2 -> note 3 ->
+    // hidden 4, broken apart as it is while the clamp plays.
+    const playingClamp = () => [
+        { connections: [null, 5, 1, 6] },
+        { connections: [0, 2] },
+        { connections: [1, null] },
+        { connections: [null, 4] },
+        { connections: [3, null] }
+    ];
+    const clampStore = () => [
+        [2, 1, 3],
+        [4, 1, null]
+    ];
+
+    beforeEach(() => {
+        setupLogoEnv();
+        logo = new Logo(createMockActivity());
+        logo.blockList = playingClamp();
+        logo.connectionStore = { 0: { 0: clampStore() } };
+    });
+
+    afterEach(() => jest.restoreAllMocks());
+
+    test("returns the connections _restoreConnections will put back", () => {
+        const restored = logo.getRestoredConnections();
+
+        expect([...restored.keys()].sort()).toEqual([2, 3, 4]);
+        logo._restoreConnections();
+        for (const [blk, connections] of restored) {
+            expect(connections).toEqual(logo.blockList[blk].connections);
+        }
+    });
+
+    test("leaves the playing clamp broken", () => {
+        logo.getRestoredConnections();
+
+        expect(logo.blockList).toEqual(playingClamp());
+        expect(logo.connectionStore[0][0]).toEqual(clampStore());
+    });
+
+    test("merges turtles that play the same clamp", () => {
+        logo.connectionStore[1] = { 0: clampStore() };
+
+        const restored = logo.getRestoredConnections();
+
+        expect(restored.size).toBe(3);
+        expect(restored.get(2)).toEqual([1, 3]);
+    });
+
+    test("is empty when no clamp is playing", () => {
+        logo.connectionStore = { 0: {} };
+
+        expect(logo.getRestoredConnections().size).toBe(0);
+    });
+});
+
 // ─── Logo doBreak ─────────────────────────────────────────────────────────────
 
 describe("Logo doBreak", () => {
@@ -1474,6 +1535,17 @@ describe("Logo runLogoCommands", () => {
         expect(logo.runFromBlock).toHaveBeenCalledWith(logo, 1, 1, 0, null);
     });
 
+    test("stops recording BPM blocks for the Tempo widget left from the last run", () => {
+        // A run stopped inside a Tempo block never reaches the block's listener.
+        logo.inTempo = true;
+        mockActivity.blocks.stackList = [];
+        logo.blockList = [];
+
+        logo.runLogoCommands(null, null);
+
+        expect(logo.inTempo).toBe(false);
+    });
+
     test("falls back to default cursor when no start stacks", () => {
         mockActivity.blocks.stackList = [];
         logo.blockList = [];
@@ -1481,6 +1553,26 @@ describe("Logo runLogoCommands", () => {
         logo.runLogoCommands(null, null);
 
         expect(document.body.style.cursor).toBe("default");
+    });
+
+    test("widget capture modes left on by an earlier run are cleared", () => {
+        // A run stopped inside a widget clamp never reaches the listener that
+        // turns its mode off, so the next run must not inherit it.
+        mockActivity.blocks.stackList = [];
+        logo.blockList = [];
+        const modes = [
+            "inSample",
+            "inTempo",
+            "inPitchSlider",
+            "inPitchStaircase",
+            "inReflectionMatrix",
+            "inOscilloscope"
+        ];
+        for (const mode of modes) logo[mode] = true;
+
+        logo.runLogoCommands(null, null);
+
+        for (const mode of modes) expect(logo[mode]).toBe(false);
     });
 
     describe("temperament carried over from an earlier run", () => {
@@ -2546,6 +2638,33 @@ describe("Logo runFromBlockNow", () => {
             expect(logo._cleanupAfterCompletion).not.toHaveBeenCalled();
         });
 
+        test("a note counter's silent run does not end the turtle's run", () => {
+            logo._cleanupAfterCompletion = jest.fn();
+            logo.onStopTurtle = jest.fn();
+            turtle0.running = true;
+            turtle0.singer.justCounting = [true];
+            turtle0.endOfClampSignals = { 7: ["_transposition_0", "_tie_0"] };
+            turtle0.butNotThese = { 7: [0] };
+
+            logo.runFromBlockNow(logo, 0, 0, 0, null);
+
+            expect(mockActivity.stage.dispatchEvent).toHaveBeenCalledWith("_tie_0");
+            expect(mockActivity.stage.dispatchEvent).not.toHaveBeenCalledWith("_transposition_0");
+            expect(turtle0.running).toBe(true);
+            expect(logo.onStopTurtle).not.toHaveBeenCalled();
+            expect(logo._cleanupAfterCompletion).not.toHaveBeenCalled();
+        });
+
+        test("a note counter's silent run keeps its signals on a premature restart", () => {
+            logo._prematureRestart = true;
+            turtle0.singer.justCounting = [true];
+            turtle0.endOfClampSignals = { 7: ["_tie_0"] };
+
+            logo.runFromBlockNow(logo, 0, 0, 0, null);
+
+            expect(mockActivity.stage.dispatchEvent).not.toHaveBeenCalledWith("_tie_0");
+        });
+
         test("_cleanupAfterCompletion does not stop WAV recorder", () => {
             const recorderStop = jest.fn();
             logo.synth = makeSynth();
@@ -3277,12 +3396,26 @@ describe("Logo notationMIDI", () => {
     test("collects MIDI records and normalizes drum array", () => {
         logo._midiData = {};
 
-        logo.notationMIDI("C4", ["kick"], 0.5, 0, 90, "piano");
-        logo.notationMIDI("D4", null, 0.25, 0, 120, "flute");
+        logo.notationMIDI("C4", ["kick"], 0.5, 0, 90, "piano", [3, 4]);
+        logo.notationMIDI("D4", null, 0.25, 0, 120, "flute", [6, 8]);
 
         expect(logo._midiData[0]).toEqual([
-            { note: "C4", duration: 0.5, bpm: 90, instrument: "piano", drum: "kick" },
-            { note: "D4", duration: 0.25, bpm: 120, instrument: "flute", drum: null }
+            {
+                note: "C4",
+                duration: 0.5,
+                bpm: 90,
+                instrument: "piano",
+                drum: "kick",
+                meter: [3, 4]
+            },
+            {
+                note: "D4",
+                duration: 0.25,
+                bpm: 120,
+                instrument: "flute",
+                drum: null,
+                meter: [6, 8]
+            }
         ]);
     });
 });

@@ -79,6 +79,7 @@ class ProjectManager {
     constructor(activity) {
         this.activity = activity;
         this._loadAnimationIntervalId = null;
+        this._saveAfterLoad = () => this.saveLocally();
     }
 
     // -----------------------------------------------------------------------
@@ -207,8 +208,8 @@ class ProjectManager {
                         "font-size: 16px; font-family: sans-serif; font-weight: bold;"
                     );
                 }
-                that.keyboardEnableFlag = 1;
             }
+            that.keyboardEnableFlag = 1;
 
             pubsub.off("finishedLoading", __afterLoad);
         };
@@ -685,7 +686,6 @@ class ProjectManager {
         document.querySelector("#myOpenFile").click();
         window.scroll(0, 0);
         that._doHardStopButton();
-        that._allClear(true, true);
     }
 
     doLoad() {
@@ -717,6 +717,7 @@ class ProjectManager {
             blockMap.push(blk);
         }
 
+        const restored = activity.logo.getRestoredConnections();
         const data = [];
         for (let blk = 0; blk < activity.blocks.blockList.length; blk++) {
             const myBlock = activity.blocks.blockList[blk];
@@ -727,7 +728,14 @@ class ProjectManager {
             let args = null;
             let exportName = myBlock.name;
 
-            if (
+            if (myBlock.unknownBlock !== undefined) {
+                if (Array.isArray(myBlock.unknownBlock)) {
+                    exportName = myBlock.unknownBlock[0];
+                    args = myBlock.unknownBlock[1] ?? null;
+                } else {
+                    exportName = myBlock.unknownBlock;
+                }
+            } else if (
                 myBlock.isValueBlock() ||
                 myBlock.name === "loadFile" ||
                 myBlock.name === "boolean"
@@ -805,9 +813,7 @@ class ProjectManager {
                     case "interval":
                     case "newnote":
                     case "action":
-                    case "matrix":
                     case "pitchdrummatrix":
-                    case "rhythmruler2":
                     case "timbre":
                     case "pitchstaircase":
                     case "tempo":
@@ -817,6 +823,42 @@ class ProjectManager {
                             collapsed: myBlock.collapsed
                         };
                         break;
+                    case "rhythmruler2":
+                        args = {
+                            collapsed: myBlock.collapsed
+                        };
+                        // The edits made in the widget, keyed by drum block. Drop the drums
+                        // that are no longer in the project.
+                        if (Array.isArray(myBlock.rulerHistory)) {
+                            args.rulerHistory = myBlock.rulerHistory
+                                .filter(entry => blockIndexById.has(entry[1]))
+                                .map(entry => [entry[0], blockIndexById.get(entry[1])]);
+                        }
+                        break;
+                    case "matrix": {
+                        args = {
+                            collapsed: myBlock.collapsed
+                        };
+                        // The selected cells, as [row block, [rhythm block, n], j]. A row block
+                        // inside a repeat has 1000000 added for each pass, which is kept. Drop
+                        // the cells whose blocks are no longer in the project.
+                        const cells =
+                            activity.logo?.phraseMaker?._blockMap?.[blk] ?? myBlock.matrixCells;
+                        if (Array.isArray(cells)) {
+                            args.matrixCells = [];
+                            for (const [rowBlock, [rhythmBlock, n], j] of cells) {
+                                const row = rowBlock % 1000000;
+                                if (blockIndexById.has(row) && blockIndexById.has(rhythmBlock)) {
+                                    args.matrixCells.push([
+                                        blockIndexById.get(row) + rowBlock - row,
+                                        [blockIndexById.get(rhythmBlock), n],
+                                        j
+                                    ]);
+                                }
+                            }
+                        }
+                        break;
+                    }
                     case "storein2":
                     case "nameddo":
                     case "nameddoArg":
@@ -826,13 +868,6 @@ class ProjectManager {
                         args = {
                             value: myBlock.privateData
                         };
-                        break;
-                    case "nopValueBlock":
-                    case "nopZeroArgBlock":
-                    case "nopOneArgBlock":
-                    case "nopTwoArgBlock":
-                    case "nopThreeArgBlock":
-                        exportName = myBlock.privateData;
                         break;
                     case "matrixData":
                         args = {
@@ -846,14 +881,23 @@ class ProjectManager {
                             value: myBlock.value
                         };
                         break;
+                    case "customsample":
+                        if (Array.isArray(myBlock.value)) {
+                            // The connected audiofile block already saves the sample data.
+                            const value = myBlock.value.slice();
+                            if (myBlock.connections[1] !== null) {
+                                value[1] = "";
+                            }
+                            args = { value: value };
+                        }
+                        break;
                     default:
                         break;
                 }
             }
 
             const connections = [];
-            for (let c = 0; c < myBlock.connections.length; c++) {
-                const connection = myBlock.connections[c];
+            for (const connection of restored.get(blk) || myBlock.connections) {
                 const mapConnection = blockIndexById.get(connection);
                 if (connection === null || mapConnection === undefined) {
                     connections.push(null);
@@ -887,6 +931,13 @@ class ProjectManager {
 
     saveLocally(options = {}) {
         const activity = this.activity;
+
+        // Don't replace the saved session with a partly loaded project.
+        if (activity.blocks.isLoading()) {
+            activity.blocks.runAfterLoad(this._saveAfterLoad);
+            return;
+        }
+
         const data = this.prepareExport();
         const rejectOnProjectSaveError = options.rejectOnProjectSaveError === true;
 
@@ -1173,12 +1224,9 @@ class ProjectManager {
             that.sendAllToTrash(false, true);
             if (clearCanvas) {
                 that._allClear(false, true);
-                if (
-                    that.gitDropdownUI &&
-                    typeof that.gitDropdownUI.clearForNewProject === "function"
-                ) {
-                    that.gitDropdownUI.clearForNewProject();
-                }
+            }
+            if (that.gitDropdownUI && typeof that.gitDropdownUI.clearForNewProject === "function") {
+                that.gitDropdownUI.clearForNewProject();
             }
 
             try {
@@ -1205,6 +1253,7 @@ class ProjectManager {
                 const reader = new FileReader();
                 const midiReader = new FileReader();
                 const mxmlReader = new FileReader();
+                const abcReader = new FileReader();
 
                 reader.onload = () => {
                     that.loading = true;
@@ -1248,7 +1297,7 @@ class ProjectManager {
                                         obj,
                                         that.fileChooser.files[0],
                                         "loadProjectFromFile",
-                                        true
+                                        false
                                     );
                                 } else {
                                     that.merging = false;
@@ -1301,15 +1350,41 @@ class ProjectManager {
                     }
                 };
 
+                abcReader.onload = async event => {
+                    that.loading = true;
+                    document.body.style.cursor = "wait";
+                    that.doLoadAnimation();
+                    try {
+                        const abcData =
+                            (event && event.target && event.target.result) || abcReader.result;
+
+                        await ensureABCJS();
+                        const tunebook = new ABCJS.parseOnly(abcData);
+
+                        debugLog(tunebook);
+                        await Promise.all(tunebook.map(tune => that.parseABC(tune)));
+                        finishLoading();
+                    } catch (e) {
+                        ErrorHandler.capture(e, { operation: "abcImport" });
+                        that.errorMsg(
+                            _("Cannot load project from the file. Please check the file type.")
+                        );
+                        finishLoading();
+                    }
+                };
+
                 const file = that.fileChooser.files[0];
                 if (file) {
                     const extension = file.name.split(".").pop().toLowerCase();
                     const isMidi = extension === "mid" || extension === "midi";
+                    const isABC = extension === "abc";
                     const isMxml = extension === "musicxml" || extension === "xml";
                     if (isMidi) {
                         midiReader.readAsArrayBuffer(file);
                     } else if (isMxml) {
                         mxmlReader.readAsText(file);
+                    } else if (isABC) {
+                        abcReader.readAsText(file);
                     } else {
                         reader.readAsText(file);
                     }
