@@ -150,6 +150,16 @@ describe("setupMeterActions", () => {
         });
     });
 
+    it("keeps an on weak beat handler when the meter changes", () => {
+        Singer.MeterActions.setMeter(4, 1 / 4, 0);
+        Singer.MeterActions.onWeakBeatDo("testAction", false, null, 0, 1);
+
+        Singer.MeterActions.setMeter(6, 1 / 8, 0);
+
+        expect(targetTurtle.singer.beatList).toEqual(["offbeat"]);
+        expect(targetTurtle.singer.defaultStrongBeats).toBe(false);
+    });
+
     it("keeps a strong beat past the end of the measure from bringing the defaults back", () => {
         Singer.MeterActions.setMeter(4, 1 / 4, 0);
         Singer.MeterActions.onStrongBeatDo(9, "testAction", false, null, 0, 1);
